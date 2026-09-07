@@ -1,0 +1,42 @@
+flowchart LR
+    client["Client / API"]
+    compliance["ComplianceReview"]
+    authorization["Authorization"]
+    transfer["Transfer<br/>workflow"]
+    ledger_tx["LedgerTransaction<br/>immutable"]
+    debit["LedgerEntry<br/>DEBIT"]
+    credit["LedgerEntry<br/>CREDIT"]
+    source["Source Wallet<br/>balance projection"]
+    destination["Destination Wallet<br/>balance projection"]
+    audit["AuditEvent<br/>append-only"]
+    outbox["Outbox / notifications"]
+
+    client -->|"creates with idempotency_key"| transfer
+    transfer -->|"PENDING_COMPLIANCE"| compliance
+    compliance -->|"APPROVED"| transfer
+    compliance -->|"REJECTED / FLAGGED"| audit
+    transfer -->|"PENDING_AUTHORIZATION"| authorization
+    authorization -->|"APPROVED"| transfer
+    authorization -->|"REJECTED"| audit
+
+    transfer -->|"APPROVED; settle atomically"| ledger_tx
+    ledger_tx --> debit
+    ledger_tx --> credit
+    debit -->|"decrease"| source
+    credit -->|"increase"| destination
+
+    transfer -.->|"state changes"| audit
+    ledger_tx -.->|"posted event"| audit
+    source -.->|"balance changes"| audit
+    destination -.->|"balance changes"| audit
+    transfer -->|"after commit"| outbox
+
+    classDef workflow fill:#e8f1ff,stroke:#2563eb,color:#111827
+    classDef accounting fill:#ecfdf5,stroke:#059669,color:#111827
+    classDef control fill:#fff7ed,stroke:#ea580c,color:#111827
+    classDef audit fill:#f5f3ff,stroke:#7c3aed,color:#111827
+
+    class client,transfer workflow
+    class ledger_tx,debit,credit,source,destination accounting
+    class compliance,authorization control
+    class audit,outbox audit
