@@ -1,0 +1,22 @@
+[project]
+name = "ledgerflow"
+version = "0.1.0"
+description = "LedgerFlow payments and compliance services"
+requires-python = ">=3.11"
+dependencies = [
+    "sqlalchemy>=2.0,<3.0",
+    "psycopg[binary]>=3.2,<4.0",
+    "fastapi[standard]>=0.141.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+python_files = ["test_*.py", "*_test.py", "testes.py"]
+
+[tool.fastapi]
+entrypoint = "services.payments.app.main:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
