@@ -1,6 +1,8 @@
 from .transfer_service import (
     IdempotencyConflictError,
     InsufficientFundsError,
+    TransferNotApprovedError,
+    TransferNotFoundError,
     TransferService,
     ValidationError,
     WalletNotFoundError,
@@ -9,6 +11,8 @@ from .transfer_service import (
 __all__ = [
     "IdempotencyConflictError",
     "InsufficientFundsError",
+    "TransferNotApprovedError",
+    "TransferNotFoundError",
     "TransferService",
     "ValidationError",
     "WalletNotFoundError",

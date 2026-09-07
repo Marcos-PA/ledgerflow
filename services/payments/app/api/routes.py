@@ -10,6 +10,8 @@ from ..infrastructure.models import TransferModel, WalletModel
 from ..services.transfer_service import (
     IdempotencyConflictError,
     InsufficientFundsError,
+    TransferNotApprovedError,
+    TransferNotFoundError,
     TransferService,
     ValidationError,
     WalletNotFoundError,
@@ -93,3 +95,17 @@ def get_transfer(transfer_id: UUID, session: Session = Depends(get_session)) -> 
     if transfer is None:
         raise HTTPException(status_code=404, detail="transfer not found")
     return transfer
+
+
+@router.post("/transfers/{transfer_id}/settle", response_model=TransferResponse)
+def settle_transfer(transfer_id: UUID, session: Session = Depends(get_session)) -> TransferModel:
+    try:
+        return TransferService(session).settle_transfer(str(transfer_id))
+    except TransferNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except TransferNotApprovedError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except InsufficientFundsError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (ValidationError, WalletNotFoundError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error

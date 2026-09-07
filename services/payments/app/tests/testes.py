@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -24,6 +24,12 @@ from services.payments.app.domain import (
 )
 from services.payments.app.infrastructure import database
 from services.payments.app.infrastructure.database import Base
+from services.payments.app.infrastructure.models import (
+	LedgerEntryModel,
+	LedgerTransactionModel,
+	TransferModel,
+	WalletModel,
+)
 from services.payments.app.main import app
 
 
@@ -184,6 +190,87 @@ def test_get_transfer_returns_transfer_and_not_found(client: TestClient) -> None
 	assert found.status_code == 200
 	assert found.json()["id"] == transfer_id
 	assert missing.status_code == 404
+
+
+def approve_transfer(transfer_id: str) -> None:
+	with database.SessionLocal() as session:
+		transfer = session.get(TransferModel, transfer_id)
+		assert transfer is not None
+		transfer.status = "APPROVED"
+		session.commit()
+
+
+def test_settle_transfer_updates_balances_and_creates_balanced_entries(client: TestClient) -> None:
+	source = create_wallet(client, balance="100")
+	destination = create_wallet(client)
+	created = client.post(
+		"/api/v1/transfers",
+		headers={"Idempotency-Key": "settlement-transfer"},
+		json={
+			"source_wallet_id": source["id"],
+			"destination_wallet_id": destination["id"],
+			"amount": "25.00",
+			"currency": "USD",
+			"requested_by": str(uuid4()),
+		},
+	)
+	approve_transfer(created.json()["id"])
+
+	settled = client.post(f"/api/v1/transfers/{created.json()['id']}/settle")
+
+	assert settled.status_code == 200
+	assert settled.json()["status"] == "COMPLETED"
+	with database.SessionLocal() as session:
+		stored_source = session.get(WalletModel, source["id"])
+		stored_destination = session.get(WalletModel, destination["id"])
+		ledger_transaction = session.scalar(
+			select(LedgerTransactionModel).where(
+				LedgerTransactionModel.transfer_id == created.json()["id"]
+			)
+		)
+		assert ledger_transaction is not None
+		entries = session.scalars(
+			select(LedgerEntryModel).where(
+				LedgerEntryModel.ledger_transaction_id == ledger_transaction.id
+			)
+		).all()
+
+	assert stored_source is not None
+	assert stored_destination is not None
+	assert stored_source.balance == Decimal("75.0000")
+	assert stored_destination.balance == Decimal("25.0000")
+	assert len(entries) == 2
+	assert {entry.direction for entry in entries} == {"DEBIT", "CREDIT"}
+	assert sum(entry.amount for entry in entries if entry.direction == "DEBIT") == Decimal("25.0000")
+	assert sum(entry.amount for entry in entries if entry.direction == "CREDIT") == Decimal("25.0000")
+
+
+def test_settle_transfer_rejects_pending_transfer_without_ledger_entries(client: TestClient) -> None:
+	source = create_wallet(client, balance="100")
+	destination = create_wallet(client)
+	created = client.post(
+		"/api/v1/transfers",
+		headers={"Idempotency-Key": "pending-settlement"},
+		json={
+			"source_wallet_id": source["id"],
+			"destination_wallet_id": destination["id"],
+			"amount": "25.00",
+			"currency": "USD",
+			"requested_by": str(uuid4()),
+		},
+	)
+
+	settled = client.post(f"/api/v1/transfers/{created.json()['id']}/settle")
+
+	assert settled.status_code == 409
+	with database.SessionLocal() as session:
+		ledger_transaction = session.scalar(
+			select(LedgerTransactionModel).where(
+				LedgerTransactionModel.transfer_id == created.json()["id"]
+			)
+		)
+
+	assert ledger_transaction is None
 
 
 @pytest.mark.parametrize(
