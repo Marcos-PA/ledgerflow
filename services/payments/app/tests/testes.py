@@ -107,6 +107,33 @@ def test_create_transfer_returns_pending_transfer_and_is_idempotent(client: Test
 	assert first.json()["status"] == "PENDING_COMPLIANCE"
 
 
+def test_create_transfer_rejects_idempotency_key_with_different_data(client: TestClient) -> None:
+	source = create_wallet(client, balance="100")
+	destination = create_wallet(client)
+	base_payload = {
+		"source_wallet_id": source["id"],
+		"destination_wallet_id": destination["id"],
+		"amount": "25.00",
+		"currency": "USD",
+		"requested_by": str(uuid4()),
+	}
+
+	first = client.post(
+		"/api/v1/transfers",
+		headers={"Idempotency-Key": "conflicting-transfer"},
+		json=base_payload,
+	)
+	conflicting = client.post(
+		"/api/v1/transfers",
+		headers={"Idempotency-Key": "conflicting-transfer"},
+		json={**base_payload, "amount": "30.00"},
+	)
+
+	assert first.status_code == 201
+	assert conflicting.status_code == 409
+	assert conflicting.json()["detail"] == "idempotency key was used with different transfer data"
+
+
 @pytest.mark.parametrize(
 	("change", "expected_status"),
 	[

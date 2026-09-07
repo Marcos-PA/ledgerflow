@@ -7,6 +7,13 @@ from sqlalchemy.orm import Session
 
 from ..infrastructure.database import get_session
 from ..infrastructure.models import TransferModel, WalletModel
+from ..services.transfer_service import (
+    IdempotencyConflictError,
+    InsufficientFundsError,
+    TransferService,
+    ValidationError,
+    WalletNotFoundError,
+)
 from .schemas import TransferCreate, TransferResponse, WalletCreate, WalletResponse
 
 
@@ -60,42 +67,24 @@ def create_transfer(
     idempotency_key: str = Header(min_length=1),
     session: Session = Depends(get_session),
 ) -> TransferModel:
-    existing = session.scalar(select(TransferModel).where(TransferModel.idempotency_key == idempotency_key))
-    if existing is not None:
-        return existing
-
-    source = session.get(WalletModel, str(payload.source_wallet_id))
-    destination = session.get(WalletModel, str(payload.destination_wallet_id))
-    if source is None or destination is None:
-        raise HTTPException(status_code=404, detail="source or destination wallet not found")
-    if source.id == destination.id:
-        raise HTTPException(status_code=400, detail="source and destination wallets must differ")
-    if source.status != "ACTIVE" or destination.status != "ACTIVE":
-        raise HTTPException(status_code=409, detail="both wallets must be active")
-    if source.currency != payload.currency or destination.currency != payload.currency:
-        raise HTTPException(status_code=400, detail="wallet currencies must match transfer currency")
-    if source.balance < payload.amount:
-        raise HTTPException(status_code=409, detail="insufficient funds")
-
-    transfer = TransferModel(
-        idempotency_key=idempotency_key,
-        source_wallet_id=source.id,
-        destination_wallet_id=destination.id,
-        amount=payload.amount,
-        currency=payload.currency,
-        requested_by=str(payload.requested_by),
-    )
-    session.add(transfer)
     try:
-        session.commit()
-    except IntegrityError as error:
-        session.rollback()
-        existing = session.scalar(select(TransferModel).where(TransferModel.idempotency_key == idempotency_key))
-        if existing is not None:
-            return existing
-        raise error
-    session.refresh(transfer)
-    return transfer
+        return TransferService(session).initiate_transfer(
+            idempotency_key=idempotency_key,
+            source_wallet_id=str(payload.source_wallet_id),
+            destination_wallet_id=str(payload.destination_wallet_id),
+            amount=payload.amount,
+            currency=payload.currency,
+            requested_by=str(payload.requested_by),
+        )
+    except WalletNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except IdempotencyConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except InsufficientFundsError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ValidationError as error:
+        status_code = 409 if "active" in str(error) else 400
+        raise HTTPException(status_code=status_code, detail=str(error)) from error
 
 
 @router.get("/transfers/{transfer_id}", response_model=TransferResponse)
