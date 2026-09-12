@@ -19,4 +19,5 @@ entrypoint = "services.payments.app.main:app"
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "alembic>=1.15.0",
 ]
