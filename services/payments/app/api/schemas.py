@@ -41,6 +41,20 @@ class TransferCreate(BaseModel):
         return value.upper()
 
 
+class ComplianceReviewCreate(BaseModel):
+    decision: str = Field(pattern="^(APPROVED|REJECTED|FLAGGED)$")
+    reviewer_id: UUID | None = None
+    reason_code: str | None = None
+    reason: str | None = None
+
+
+class AuthorizationCreate(BaseModel):
+    authorizer_id: UUID
+    decision: str = Field(pattern="^(APPROVED|REJECTED)$")
+    policy_version: str = Field(min_length=1)
+    reason: str | None = None
+
+
 class TransferResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

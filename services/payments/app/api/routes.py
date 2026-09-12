@@ -10,13 +10,23 @@ from ..infrastructure.models import TransferModel, WalletModel
 from ..services.transfer_service import (
     IdempotencyConflictError,
     InsufficientFundsError,
+    SelfAuthorizationError,
     TransferNotApprovedError,
     TransferNotFoundError,
+    TransferNotPendingAuthorizationError,
+    TransferNotPendingComplianceError,
     TransferService,
     ValidationError,
     WalletNotFoundError,
 )
-from .schemas import TransferCreate, TransferResponse, WalletCreate, WalletResponse
+from .schemas import (
+    AuthorizationCreate,
+    ComplianceReviewCreate,
+    TransferCreate,
+    TransferResponse,
+    WalletCreate,
+    WalletResponse,
+)
 
 
 router = APIRouter()
@@ -95,6 +105,52 @@ def get_transfer(transfer_id: UUID, session: Session = Depends(get_session)) -> 
     if transfer is None:
         raise HTTPException(status_code=404, detail="transfer not found")
     return transfer
+
+
+@router.post("/transfers/{transfer_id}/compliance-review", response_model=TransferResponse)
+def review_compliance(
+    transfer_id: UUID,
+    payload: ComplianceReviewCreate,
+    session: Session = Depends(get_session),
+) -> TransferModel:
+    try:
+        return TransferService(session).review_compliance(
+            str(transfer_id),
+            decision=payload.decision,
+            reviewer_id=str(payload.reviewer_id) if payload.reviewer_id else None,
+            reason_code=payload.reason_code,
+            reason=payload.reason,
+        )
+    except TransferNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except TransferNotPendingComplianceError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ValidationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.post("/transfers/{transfer_id}/authorize", response_model=TransferResponse)
+def authorize_transfer(
+    transfer_id: UUID,
+    payload: AuthorizationCreate,
+    session: Session = Depends(get_session),
+) -> TransferModel:
+    try:
+        return TransferService(session).authorize_transfer(
+            str(transfer_id),
+            authorizer_id=str(payload.authorizer_id),
+            decision=payload.decision,
+            policy_version=payload.policy_version,
+            reason=payload.reason,
+        )
+    except TransferNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except TransferNotPendingAuthorizationError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except SelfAuthorizationError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    except ValidationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @router.post("/transfers/{transfer_id}/settle", response_model=TransferResponse)
