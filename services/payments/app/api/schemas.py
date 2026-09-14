@@ -2,7 +2,29 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
+from ..services.auth_service import ROLES
+
+
+class UserRegister(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8)
+    role: str = Field(pattern="^(" + "|".join(ROLES) + ")$")
+
+
+class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    email: str
+    role: str
+    created_at: datetime
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
 
 
 class WalletCreate(BaseModel):
@@ -33,7 +55,6 @@ class TransferCreate(BaseModel):
     destination_wallet_id: UUID
     amount: Decimal = Field(gt=0)
     currency: str = Field(min_length=3, max_length=3)
-    requested_by: UUID
 
     @field_validator("currency")
     @classmethod
@@ -43,13 +64,11 @@ class TransferCreate(BaseModel):
 
 class ComplianceReviewCreate(BaseModel):
     decision: str = Field(pattern="^(APPROVED|REJECTED|FLAGGED)$")
-    reviewer_id: UUID | None = None
     reason_code: str | None = None
     reason: str | None = None
 
 
 class AuthorizationCreate(BaseModel):
-    authorizer_id: UUID
     decision: str = Field(pattern="^(APPROVED|REJECTED)$")
     policy_version: str = Field(min_length=1)
     reason: str | None = None

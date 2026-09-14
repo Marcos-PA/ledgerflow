@@ -8,6 +8,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/ledgerflow
       FRONTEND_ORIGIN: http://localhost:5173
+      JWT_SECRET: dev-secret-change-me-before-any-real-deploy
     depends_on:
       db:
         condition: service_healthy

@@ -58,19 +58,73 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Generator[TestClient, None, None]
 	engine.dispose()
 
 
-def create_wallet(client: TestClient, *, balance: str = "0", currency: str = "USD") -> dict:
+def register_and_login(client: TestClient, *, role: str = "requester") -> tuple[str, dict]:
+	email = f"{uuid4()}@example.com"
+	password = "correct horse battery staple"
+	registered = client.post(
+		"/api/v1/auth/register",
+		json={"email": email, "password": password, "role": role},
+	)
+	assert registered.status_code == 201
+	logged_in = client.post("/api/v1/auth/login", data={"username": email, "password": password})
+	assert logged_in.status_code == 200
+	token = logged_in.json()["access_token"]
+	return registered.json()["id"], {"Authorization": f"Bearer {token}"}
+
+
+def create_wallet(client: TestClient, headers: dict, *, balance: str = "0", currency: str = "USD") -> dict:
 	response = client.post(
 		"/api/v1/wallets",
+		headers=headers,
 		json={"owner_id": str(uuid4()), "currency": currency, "initial_balance": balance},
 	)
 	assert response.status_code == 201
 	return response.json()
 
 
+def test_register_and_login_returns_working_token(client: TestClient) -> None:
+	_, headers = register_and_login(client)
+
+	wallet = create_wallet(client, headers)
+
+	assert wallet["status"] == "ACTIVE"
+
+
+def test_login_rejects_wrong_password(client: TestClient) -> None:
+	email = f"{uuid4()}@example.com"
+	client.post("/api/v1/auth/register", json={"email": email, "password": "correct-password", "role": "requester"})
+
+	response = client.post("/api/v1/auth/login", data={"username": email, "password": "wrong-password"})
+
+	assert response.status_code == 401
+
+
+def test_register_rejects_duplicate_email(client: TestClient) -> None:
+	email = f"{uuid4()}@example.com"
+	payload = {"email": email, "password": "correct horse battery staple", "role": "requester"}
+
+	first = client.post("/api/v1/auth/register", json=payload)
+	duplicate = client.post("/api/v1/auth/register", json=payload)
+
+	assert first.status_code == 201
+	assert duplicate.status_code == 409
+
+
+def test_create_wallet_rejects_missing_token(client: TestClient) -> None:
+	response = client.post(
+		"/api/v1/wallets",
+		json={"owner_id": str(uuid4()), "currency": "USD", "initial_balance": "0"},
+	)
+
+	assert response.status_code == 401
+
+
 @pytest.mark.parametrize("currency", ["USD", "eur"])
 def test_health_and_wallet_creation(client: TestClient, currency: str) -> None:
 	assert client.get("/api/v1/health").json() == {"status": "ok"}
-	wallet = create_wallet(client, currency=currency)
+	_, headers = register_and_login(client)
+
+	wallet = create_wallet(client, headers, currency=currency)
 
 	assert wallet["currency"] == currency.upper()
 	assert wallet["status"] == "ACTIVE"
@@ -78,18 +132,19 @@ def test_health_and_wallet_creation(client: TestClient, currency: str) -> None:
 
 
 def test_create_wallet_rejects_duplicate_owner_and_currency(client: TestClient) -> None:
-	owner_id = str(uuid4())
-	payload = {"owner_id": owner_id, "currency": "USD", "initial_balance": "10"}
+	_, headers = register_and_login(client)
+	payload = {"owner_id": str(uuid4()), "currency": "USD", "initial_balance": "10"}
 
-	first = client.post("/api/v1/wallets", json=payload)
-	duplicate = client.post("/api/v1/wallets", json=payload)
+	first = client.post("/api/v1/wallets", headers=headers, json=payload)
+	duplicate = client.post("/api/v1/wallets", headers=headers, json=payload)
 
 	assert first.status_code == 201
 	assert duplicate.status_code == 409
 
 
 def test_get_wallet_returns_wallet_and_not_found(client: TestClient) -> None:
-	wallet = create_wallet(client, balance="12.50")
+	_, headers = register_and_login(client)
+	wallet = create_wallet(client, headers, balance="12.50")
 
 	found = client.get(f"/api/v1/wallets/{wallet['id']}")
 	missing = client.get(f"/api/v1/wallets/{uuid4()}")
@@ -99,45 +154,69 @@ def test_get_wallet_returns_wallet_and_not_found(client: TestClient) -> None:
 	assert missing.status_code == 404
 
 
+def test_create_transfer_rejects_missing_token(client: TestClient) -> None:
+	_, headers = register_and_login(client)
+	source = create_wallet(client, headers, balance="100")
+	destination = create_wallet(client, headers)
+
+	response = client.post(
+		"/api/v1/transfers",
+		headers={"Idempotency-Key": str(uuid4())},
+		json={
+			"source_wallet_id": source["id"],
+			"destination_wallet_id": destination["id"],
+			"amount": "25.00",
+			"currency": "USD",
+		},
+	)
+
+	assert response.status_code == 401
+
+
 def test_create_transfer_returns_pending_transfer_and_is_idempotent(client: TestClient) -> None:
-	source = create_wallet(client, balance="100")
-	destination = create_wallet(client)
+	requester_id, headers = register_and_login(client)
+	source = create_wallet(client, headers, balance="100")
+	destination = create_wallet(client, headers)
 	payload = {
 		"source_wallet_id": source["id"],
 		"destination_wallet_id": destination["id"],
 		"amount": "25.00",
 		"currency": "usd",
-		"requested_by": str(uuid4()),
 	}
 
-	first = client.post("/api/v1/transfers", headers={"Idempotency-Key": "transfer-1"}, json=payload)
-	retry = client.post("/api/v1/transfers", headers={"Idempotency-Key": "transfer-1"}, json=payload)
+	first = client.post(
+		"/api/v1/transfers", headers={**headers, "Idempotency-Key": "transfer-1"}, json=payload
+	)
+	retry = client.post(
+		"/api/v1/transfers", headers={**headers, "Idempotency-Key": "transfer-1"}, json=payload
+	)
 
 	assert first.status_code == 201
 	assert retry.status_code == 201
 	assert first.json()["id"] == retry.json()["id"]
 	assert first.json()["status"] == "PENDING_COMPLIANCE"
+	assert first.json()["requested_by"] == requester_id
 
 
 def test_create_transfer_rejects_idempotency_key_with_different_data(client: TestClient) -> None:
-	source = create_wallet(client, balance="100")
-	destination = create_wallet(client)
+	_, headers = register_and_login(client)
+	source = create_wallet(client, headers, balance="100")
+	destination = create_wallet(client, headers)
 	base_payload = {
 		"source_wallet_id": source["id"],
 		"destination_wallet_id": destination["id"],
 		"amount": "25.00",
 		"currency": "USD",
-		"requested_by": str(uuid4()),
 	}
 
 	first = client.post(
 		"/api/v1/transfers",
-		headers={"Idempotency-Key": "conflicting-transfer"},
+		headers={**headers, "Idempotency-Key": "conflicting-transfer"},
 		json=base_payload,
 	)
 	conflicting = client.post(
 		"/api/v1/transfers",
-		headers={"Idempotency-Key": "conflicting-transfer"},
+		headers={**headers, "Idempotency-Key": "conflicting-transfer"},
 		json={**base_payload, "amount": "30.00"},
 	)
 
@@ -158,25 +237,28 @@ def test_create_transfer_rejects_invalid_money_rules(
 	change: dict[str, str],
 	expected_status: int,
 ) -> None:
-	source = create_wallet(client, balance="100")
-	destination = create_wallet(client)
+	_, headers = register_and_login(client)
+	source = create_wallet(client, headers, balance="100")
+	destination = create_wallet(client, headers)
 	payload = {
 		"source_wallet_id": source["id"],
 		"destination_wallet_id": destination["id"],
 		"amount": "25.00",
 		"currency": "USD",
-		"requested_by": str(uuid4()),
 		**change,
 	}
 
-	response = client.post("/api/v1/transfers", headers={"Idempotency-Key": str(uuid4())}, json=payload)
+	response = client.post(
+		"/api/v1/transfers", headers={**headers, "Idempotency-Key": str(uuid4())}, json=payload
+	)
 
 	assert response.status_code == expected_status
 
 
 def test_list_wallets_returns_all_wallets(client: TestClient) -> None:
-	first = create_wallet(client, currency="USD")
-	second = create_wallet(client, currency="EUR")
+	_, headers = register_and_login(client)
+	first = create_wallet(client, headers, currency="USD")
+	second = create_wallet(client, headers, currency="EUR")
 
 	response = client.get("/api/v1/wallets")
 
@@ -186,17 +268,17 @@ def test_list_wallets_returns_all_wallets(client: TestClient) -> None:
 
 
 def test_list_transfers_returns_all_transfers(client: TestClient) -> None:
-	source = create_wallet(client, balance="20")
-	destination = create_wallet(client)
+	_, headers = register_and_login(client)
+	source = create_wallet(client, headers, balance="20")
+	destination = create_wallet(client, headers)
 	created = client.post(
 		"/api/v1/transfers",
-		headers={"Idempotency-Key": str(uuid4())},
+		headers={**headers, "Idempotency-Key": str(uuid4())},
 		json={
 			"source_wallet_id": source["id"],
 			"destination_wallet_id": destination["id"],
 			"amount": "5",
 			"currency": "USD",
-			"requested_by": str(uuid4()),
 		},
 	)
 
@@ -208,17 +290,17 @@ def test_list_transfers_returns_all_transfers(client: TestClient) -> None:
 
 
 def test_get_transfer_returns_transfer_and_not_found(client: TestClient) -> None:
-	source = create_wallet(client, balance="20")
-	destination = create_wallet(client)
+	_, headers = register_and_login(client)
+	source = create_wallet(client, headers, balance="20")
+	destination = create_wallet(client, headers)
 	response = client.post(
 		"/api/v1/transfers",
-		headers={"Idempotency-Key": "lookup-transfer"},
+		headers={**headers, "Idempotency-Key": "lookup-transfer"},
 		json={
 			"source_wallet_id": source["id"],
 			"destination_wallet_id": destination["id"],
 			"amount": "5",
 			"currency": "USD",
-			"requested_by": str(uuid4()),
 		},
 	)
 	transfer_id = response.json()["id"]
@@ -231,24 +313,50 @@ def test_get_transfer_returns_transfer_and_not_found(client: TestClient) -> None
 	assert missing.status_code == 404
 
 
-def test_review_compliance_approves_and_advances_transfer(client: TestClient) -> None:
-	source = create_wallet(client, balance="50")
-	destination = create_wallet(client)
+def test_review_compliance_rejects_wrong_role(client: TestClient) -> None:
+	_, requester_headers = register_and_login(client)
+	source = create_wallet(client, requester_headers, balance="50")
+	destination = create_wallet(client, requester_headers)
 	created = client.post(
 		"/api/v1/transfers",
-		headers={"Idempotency-Key": str(uuid4())},
+		headers={**requester_headers, "Idempotency-Key": str(uuid4())},
 		json={
 			"source_wallet_id": source["id"],
 			"destination_wallet_id": destination["id"],
 			"amount": "10",
 			"currency": "USD",
-			"requested_by": str(uuid4()),
 		},
 	)
 
 	reviewed = client.post(
 		f"/api/v1/transfers/{created.json()['id']}/compliance-review",
-		json={"decision": "APPROVED", "reviewer_id": str(uuid4())},
+		headers=requester_headers,
+		json={"decision": "APPROVED"},
+	)
+
+	assert reviewed.status_code == 403
+
+
+def test_review_compliance_approves_and_advances_transfer(client: TestClient) -> None:
+	_, requester_headers = register_and_login(client)
+	_, compliance_headers = register_and_login(client, role="compliance_officer")
+	source = create_wallet(client, requester_headers, balance="50")
+	destination = create_wallet(client, requester_headers)
+	created = client.post(
+		"/api/v1/transfers",
+		headers={**requester_headers, "Idempotency-Key": str(uuid4())},
+		json={
+			"source_wallet_id": source["id"],
+			"destination_wallet_id": destination["id"],
+			"amount": "10",
+			"currency": "USD",
+		},
+	)
+
+	reviewed = client.post(
+		f"/api/v1/transfers/{created.json()['id']}/compliance-review",
+		headers=compliance_headers,
+		json={"decision": "APPROVED"},
 	)
 
 	assert reviewed.status_code == 200
@@ -256,22 +364,24 @@ def test_review_compliance_approves_and_advances_transfer(client: TestClient) ->
 
 
 def test_review_compliance_rejects_transfer_and_records_failure_reason(client: TestClient) -> None:
-	source = create_wallet(client, balance="50")
-	destination = create_wallet(client)
+	_, requester_headers = register_and_login(client)
+	_, compliance_headers = register_and_login(client, role="compliance_officer")
+	source = create_wallet(client, requester_headers, balance="50")
+	destination = create_wallet(client, requester_headers)
 	created = client.post(
 		"/api/v1/transfers",
-		headers={"Idempotency-Key": str(uuid4())},
+		headers={**requester_headers, "Idempotency-Key": str(uuid4())},
 		json={
 			"source_wallet_id": source["id"],
 			"destination_wallet_id": destination["id"],
 			"amount": "10",
 			"currency": "USD",
-			"requested_by": str(uuid4()),
 		},
 	)
 
 	reviewed = client.post(
 		f"/api/v1/transfers/{created.json()['id']}/compliance-review",
+		headers=compliance_headers,
 		json={"decision": "REJECTED", "reason_code": "AML_HIT", "reason": "sanctions match"},
 	)
 
@@ -281,50 +391,96 @@ def test_review_compliance_rejects_transfer_and_records_failure_reason(client: T
 
 
 def test_review_compliance_rejects_when_not_pending_compliance(client: TestClient) -> None:
-	source = create_wallet(client, balance="50")
-	destination = create_wallet(client)
+	_, requester_headers = register_and_login(client)
+	_, compliance_headers = register_and_login(client, role="compliance_officer")
+	source = create_wallet(client, requester_headers, balance="50")
+	destination = create_wallet(client, requester_headers)
 	created = client.post(
 		"/api/v1/transfers",
-		headers={"Idempotency-Key": str(uuid4())},
+		headers={**requester_headers, "Idempotency-Key": str(uuid4())},
 		json={
 			"source_wallet_id": source["id"],
 			"destination_wallet_id": destination["id"],
 			"amount": "10",
 			"currency": "USD",
-			"requested_by": str(uuid4()),
 		},
 	)
 	transfer_id = created.json()["id"]
-	client.post(f"/api/v1/transfers/{transfer_id}/compliance-review", json={"decision": "APPROVED"})
+	client.post(
+		f"/api/v1/transfers/{transfer_id}/compliance-review",
+		headers=compliance_headers,
+		json={"decision": "APPROVED"},
+	)
 
-	second = client.post(f"/api/v1/transfers/{transfer_id}/compliance-review", json={"decision": "APPROVED"})
+	second = client.post(
+		f"/api/v1/transfers/{transfer_id}/compliance-review",
+		headers=compliance_headers,
+		json={"decision": "APPROVED"},
+	)
 
 	assert second.status_code == 409
 
 
-def test_authorize_transfer_approves_and_enables_settlement(client: TestClient) -> None:
-	source = create_wallet(client, balance="50")
-	destination = create_wallet(client)
-	requested_by = str(uuid4())
+def test_authorize_transfer_rejects_wrong_role(client: TestClient) -> None:
+	_, requester_headers = register_and_login(client)
+	_, compliance_headers = register_and_login(client, role="compliance_officer")
+	source = create_wallet(client, requester_headers, balance="50")
+	destination = create_wallet(client, requester_headers)
 	created = client.post(
 		"/api/v1/transfers",
-		headers={"Idempotency-Key": str(uuid4())},
+		headers={**requester_headers, "Idempotency-Key": str(uuid4())},
 		json={
 			"source_wallet_id": source["id"],
 			"destination_wallet_id": destination["id"],
 			"amount": "10",
 			"currency": "USD",
-			"requested_by": requested_by,
 		},
 	)
 	transfer_id = created.json()["id"]
-	client.post(f"/api/v1/transfers/{transfer_id}/compliance-review", json={"decision": "APPROVED"})
+	client.post(
+		f"/api/v1/transfers/{transfer_id}/compliance-review",
+		headers=compliance_headers,
+		json={"decision": "APPROVED"},
+	)
 
 	authorized = client.post(
 		f"/api/v1/transfers/{transfer_id}/authorize",
-		json={"authorizer_id": str(uuid4()), "decision": "APPROVED", "policy_version": "policy-v1"},
+		headers=requester_headers,
+		json={"decision": "APPROVED", "policy_version": "policy-v1"},
 	)
-	settled = client.post(f"/api/v1/transfers/{transfer_id}/settle")
+
+	assert authorized.status_code == 403
+
+
+def test_authorize_transfer_approves_and_enables_settlement(client: TestClient) -> None:
+	_, requester_headers = register_and_login(client)
+	_, compliance_headers = register_and_login(client, role="compliance_officer")
+	_, authorizer_headers = register_and_login(client, role="authorizer")
+	source = create_wallet(client, requester_headers, balance="50")
+	destination = create_wallet(client, requester_headers)
+	created = client.post(
+		"/api/v1/transfers",
+		headers={**requester_headers, "Idempotency-Key": str(uuid4())},
+		json={
+			"source_wallet_id": source["id"],
+			"destination_wallet_id": destination["id"],
+			"amount": "10",
+			"currency": "USD",
+		},
+	)
+	transfer_id = created.json()["id"]
+	client.post(
+		f"/api/v1/transfers/{transfer_id}/compliance-review",
+		headers=compliance_headers,
+		json={"decision": "APPROVED"},
+	)
+
+	authorized = client.post(
+		f"/api/v1/transfers/{transfer_id}/authorize",
+		headers=authorizer_headers,
+		json={"decision": "APPROVED", "policy_version": "policy-v1"},
+	)
+	settled = client.post(f"/api/v1/transfers/{transfer_id}/settle", headers=requester_headers)
 
 	assert authorized.status_code == 200
 	assert authorized.json()["status"] == "APPROVED"
@@ -333,76 +489,90 @@ def test_authorize_transfer_approves_and_enables_settlement(client: TestClient) 
 
 
 def test_authorize_transfer_rejects_self_authorization(client: TestClient) -> None:
-	source = create_wallet(client, balance="50")
-	destination = create_wallet(client)
-	requested_by = str(uuid4())
+	_, compliance_headers = register_and_login(client, role="compliance_officer")
+	_, authorizer_headers = register_and_login(client, role="authorizer")
+	source = create_wallet(client, authorizer_headers, balance="50")
+	destination = create_wallet(client, authorizer_headers)
 	created = client.post(
 		"/api/v1/transfers",
-		headers={"Idempotency-Key": str(uuid4())},
+		headers={**authorizer_headers, "Idempotency-Key": str(uuid4())},
 		json={
 			"source_wallet_id": source["id"],
 			"destination_wallet_id": destination["id"],
 			"amount": "10",
 			"currency": "USD",
-			"requested_by": requested_by,
 		},
 	)
 	transfer_id = created.json()["id"]
-	client.post(f"/api/v1/transfers/{transfer_id}/compliance-review", json={"decision": "APPROVED"})
+	client.post(
+		f"/api/v1/transfers/{transfer_id}/compliance-review",
+		headers=compliance_headers,
+		json={"decision": "APPROVED"},
+	)
 
 	authorized = client.post(
 		f"/api/v1/transfers/{transfer_id}/authorize",
-		json={"authorizer_id": requested_by, "decision": "APPROVED", "policy_version": "policy-v1"},
+		headers=authorizer_headers,
+		json={"decision": "APPROVED", "policy_version": "policy-v1"},
 	)
 
 	assert authorized.status_code == 403
 
 
 def test_authorize_transfer_rejects_when_not_pending_authorization(client: TestClient) -> None:
-	source = create_wallet(client, balance="50")
-	destination = create_wallet(client)
+	_, requester_headers = register_and_login(client)
+	_, authorizer_headers = register_and_login(client, role="authorizer")
+	source = create_wallet(client, requester_headers, balance="50")
+	destination = create_wallet(client, requester_headers)
 	created = client.post(
 		"/api/v1/transfers",
-		headers={"Idempotency-Key": str(uuid4())},
+		headers={**requester_headers, "Idempotency-Key": str(uuid4())},
 		json={
 			"source_wallet_id": source["id"],
 			"destination_wallet_id": destination["id"],
 			"amount": "10",
 			"currency": "USD",
-			"requested_by": str(uuid4()),
 		},
 	)
 	transfer_id = created.json()["id"]
 
 	authorized = client.post(
 		f"/api/v1/transfers/{transfer_id}/authorize",
-		json={"authorizer_id": str(uuid4()), "decision": "APPROVED", "policy_version": "policy-v1"},
+		headers=authorizer_headers,
+		json={"decision": "APPROVED", "policy_version": "policy-v1"},
 	)
 
 	assert authorized.status_code == 409
 
 
 def test_transfer_lifecycle_writes_chained_audit_events(client: TestClient) -> None:
-	source = create_wallet(client, balance="50")
-	destination = create_wallet(client)
+	_, requester_headers = register_and_login(client)
+	_, compliance_headers = register_and_login(client, role="compliance_officer")
+	_, authorizer_headers = register_and_login(client, role="authorizer")
+	source = create_wallet(client, requester_headers, balance="50")
+	destination = create_wallet(client, requester_headers)
 	created = client.post(
 		"/api/v1/transfers",
-		headers={"Idempotency-Key": str(uuid4())},
+		headers={**requester_headers, "Idempotency-Key": str(uuid4())},
 		json={
 			"source_wallet_id": source["id"],
 			"destination_wallet_id": destination["id"],
 			"amount": "10",
 			"currency": "USD",
-			"requested_by": str(uuid4()),
 		},
 	)
 	transfer_id = created.json()["id"]
-	client.post(f"/api/v1/transfers/{transfer_id}/compliance-review", json={"decision": "APPROVED"})
+	client.post(
+		f"/api/v1/transfers/{transfer_id}/compliance-review",
+		headers=compliance_headers,
+		json={"decision": "APPROVED"},
+	)
 	client.post(
 		f"/api/v1/transfers/{transfer_id}/authorize",
-		json={"authorizer_id": str(uuid4()), "decision": "APPROVED", "policy_version": "policy-v1"},
+		headers=authorizer_headers,
+		json={"decision": "APPROVED", "policy_version": "policy-v1"},
 	)
-	client.post(f"/api/v1/transfers/{transfer_id}/settle")
+	client.post(f"/api/v1/transfers/{transfer_id}/settle", headers=requester_headers)
 
 	with database.SessionLocal() as session:
 		events = session.scalars(
@@ -432,22 +602,22 @@ def approve_transfer(transfer_id: str) -> None:
 
 
 def test_settle_transfer_updates_balances_and_creates_balanced_entries(client: TestClient) -> None:
-	source = create_wallet(client, balance="100")
-	destination = create_wallet(client)
+	_, headers = register_and_login(client)
+	source = create_wallet(client, headers, balance="100")
+	destination = create_wallet(client, headers)
 	created = client.post(
 		"/api/v1/transfers",
-		headers={"Idempotency-Key": "settlement-transfer"},
+		headers={**headers, "Idempotency-Key": "settlement-transfer"},
 		json={
 			"source_wallet_id": source["id"],
 			"destination_wallet_id": destination["id"],
 			"amount": "25.00",
 			"currency": "USD",
-			"requested_by": str(uuid4()),
 		},
 	)
 	approve_transfer(created.json()["id"])
 
-	settled = client.post(f"/api/v1/transfers/{created.json()['id']}/settle")
+	settled = client.post(f"/api/v1/transfers/{created.json()['id']}/settle", headers=headers)
 
 	assert settled.status_code == 200
 	assert settled.json()["status"] == "COMPLETED"
@@ -477,17 +647,17 @@ def test_settle_transfer_updates_balances_and_creates_balanced_entries(client: T
 
 
 def test_settle_transfer_marks_transfer_failed_on_insufficient_funds(client: TestClient) -> None:
-	source = create_wallet(client, balance="100")
-	destination = create_wallet(client)
+	_, headers = register_and_login(client)
+	source = create_wallet(client, headers, balance="100")
+	destination = create_wallet(client, headers)
 	created = client.post(
 		"/api/v1/transfers",
-		headers={"Idempotency-Key": "failed-settlement"},
+		headers={**headers, "Idempotency-Key": "failed-settlement"},
 		json={
 			"source_wallet_id": source["id"],
 			"destination_wallet_id": destination["id"],
 			"amount": "25.00",
 			"currency": "USD",
-			"requested_by": str(uuid4()),
 		},
 	)
 	transfer_id = created.json()["id"]
@@ -498,7 +668,7 @@ def test_settle_transfer_marks_transfer_failed_on_insufficient_funds(client: Tes
 		wallet.balance = Decimal("0")
 		session.commit()
 
-	settled = client.post(f"/api/v1/transfers/{transfer_id}/settle")
+	settled = client.post(f"/api/v1/transfers/{transfer_id}/settle", headers=headers)
 
 	assert settled.status_code == 409
 	found = client.get(f"/api/v1/transfers/{transfer_id}")
@@ -507,21 +677,21 @@ def test_settle_transfer_marks_transfer_failed_on_insufficient_funds(client: Tes
 
 
 def test_settle_transfer_rejects_pending_transfer_without_ledger_entries(client: TestClient) -> None:
-	source = create_wallet(client, balance="100")
-	destination = create_wallet(client)
+	_, headers = register_and_login(client)
+	source = create_wallet(client, headers, balance="100")
+	destination = create_wallet(client, headers)
 	created = client.post(
 		"/api/v1/transfers",
-		headers={"Idempotency-Key": "pending-settlement"},
+		headers={**headers, "Idempotency-Key": "pending-settlement"},
 		json={
 			"source_wallet_id": source["id"],
 			"destination_wallet_id": destination["id"],
 			"amount": "25.00",
 			"currency": "USD",
-			"requested_by": str(uuid4()),
 		},
 	)
 
-	settled = client.post(f"/api/v1/transfers/{created.json()['id']}/settle")
+	settled = client.post(f"/api/v1/transfers/{created.json()['id']}/settle", headers=headers)
 
 	assert settled.status_code == 409
 	with database.SessionLocal() as session:

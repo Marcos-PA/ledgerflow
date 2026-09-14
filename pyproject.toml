@@ -8,6 +8,7 @@ dependencies = [
     "psycopg[binary]>=3.2,<4.0",
     "fastapi[standard]>=0.141.1",
     "python-dotenv>=1.2.3",
+    "pyjwt>=2.14.0",
 ]
 
 [tool.pytest.ini_options]
