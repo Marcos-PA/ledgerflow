@@ -6,6 +6,11 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./ledgerflow.db")
+# Heroku Postgres (and some other hosts) hand out "postgres://", which
+# SQLAlchemy 1.4+/2.0 no longer accepts — and we specifically want the
+# psycopg driver, not whatever SQLAlchemy would guess as the default.
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
 
 
 class Base(DeclarativeBase):
