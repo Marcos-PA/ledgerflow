@@ -1,15 +1,14 @@
 from decimal import Decimal
 from datetime import datetime, timezone
+import os
 from typing import Any
-from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..domain import ActorType, AuditAggregateType, AuditEvent
+from ..domain import ActorType, AuditAggregateType
 from ..infrastructure.models import (
-    AuditEventModel,
     AuthorizationModel,
     ComplianceReviewModel,
     LedgerEntryModel,
@@ -17,6 +16,13 @@ from ..infrastructure.models import (
     TransferModel,
     WalletModel,
 )
+from .audit_service import write_audit_event
+
+
+# ponytail: single process-wide N-of-M threshold via env var instead of a
+# per-wallet/per-amount policy table — upgrade to a real policy model if
+# different transfer classes ever need different thresholds.
+AUTHORIZATION_THRESHOLD = int(os.getenv("AUTHORIZATION_THRESHOLD", "1"))
 
 
 class TransferServiceError(Exception):
@@ -59,6 +65,18 @@ class SelfAuthorizationError(TransferServiceError):
     pass
 
 
+class TransferNotCompletedError(TransferServiceError):
+    pass
+
+
+class TransferAlreadyReversedError(TransferServiceError):
+    pass
+
+
+class DuplicateAuthorizationError(TransferServiceError):
+    pass
+
+
 class TransferService:
     def __init__(self, session: Session):
         self.session = session
@@ -72,6 +90,7 @@ class TransferService:
         amount: Decimal,
         currency: str,
         requested_by: str,
+        reversal_of_transfer_id: str | None = None,
     ) -> TransferModel:
         existing = self.session.scalar(
             select(TransferModel).where(TransferModel.idempotency_key == idempotency_key)
@@ -107,6 +126,7 @@ class TransferService:
             amount=amount,
             currency=currency,
             requested_by=requested_by,
+            reversal_of_transfer_id=reversal_of_transfer_id,
         )
         self.session.add(transfer)
         try:
@@ -136,6 +156,28 @@ class TransferService:
             return existing
         self.session.refresh(transfer)
         return transfer
+
+    def reverse_transfer(self, transfer_id: str, *, requested_by: str) -> TransferModel:
+        original = self.session.scalar(select(TransferModel).where(TransferModel.id == transfer_id))
+        if original is None:
+            raise TransferNotFoundError("transfer not found")
+        if original.status != "COMPLETED":
+            raise TransferNotCompletedError("only completed transfers can be reversed")
+        already_reversed = self.session.scalar(
+            select(TransferModel).where(TransferModel.reversal_of_transfer_id == original.id)
+        )
+        if already_reversed is not None:
+            raise TransferAlreadyReversedError("transfer has already been reversed")
+
+        return self.initiate_transfer(
+            idempotency_key=f"reversal:{original.id}",
+            source_wallet_id=original.destination_wallet_id,
+            destination_wallet_id=original.source_wallet_id,
+            amount=original.amount,
+            currency=original.currency,
+            requested_by=requested_by,
+            reversal_of_transfer_id=original.id,
+        )
 
     def settle_transfer(self, transfer_id: str) -> TransferModel:
         settlement_error: TransferServiceError | None = None
@@ -312,6 +354,14 @@ class TransferService:
             raise TransferNotPendingAuthorizationError("transfer is not pending authorization")
         if authorizer_id == transfer.requested_by:
             raise SelfAuthorizationError("an authorizer cannot authorize their own transfer")
+        already_authorized = self.session.scalar(
+            select(AuthorizationModel).where(
+                AuthorizationModel.transfer_id == transfer.id,
+                AuthorizationModel.authorizer_id == authorizer_id,
+            )
+        )
+        if already_authorized is not None:
+            raise DuplicateAuthorizationError("authorizer has already submitted a decision for this transfer")
 
         now = datetime.now(timezone.utc)
         self.session.add(
@@ -325,9 +375,22 @@ class TransferService:
             )
         )
 
+        approvals = 0
         if decision == "APPROVED":
-            transfer.status = "APPROVED"
-            transfer.approved_at = now
+            approvals = (
+                self.session.scalar(
+                    select(func.count())
+                    .select_from(AuthorizationModel)
+                    .where(
+                        AuthorizationModel.transfer_id == transfer.id,
+                        AuthorizationModel.decision == "APPROVED",
+                    )
+                )
+                or 0
+            ) + 1  # the row above is not flushed yet
+            if approvals >= AUTHORIZATION_THRESHOLD:
+                transfer.status = "APPROVED"
+                transfer.approved_at = now
         else:
             transfer.status = "REJECTED"
             transfer.rejected_at = now
@@ -339,7 +402,7 @@ class TransferService:
             actor_id=authorizer_id,
             actor_type=ActorType.USER,
             reason=reason,
-            metadata={"policy_version": policy_version},
+            metadata={"policy_version": policy_version, "approvals": approvals, "threshold": AUTHORIZATION_THRESHOLD},
         )
         self.session.commit()
         return transfer
@@ -354,39 +417,15 @@ class TransferService:
         reason: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        previous = self.session.scalar(
-            select(AuditEventModel)
-            .where(
-                AuditEventModel.aggregate_type == AuditAggregateType.TRANSFER.value,
-                AuditEventModel.aggregate_id == transfer_id,
-            )
-            .order_by(AuditEventModel.occurred_at.desc())
-            .limit(1)
-        )
-        event = AuditEvent(
+        write_audit_event(
+            self.session,
             aggregate_type=AuditAggregateType.TRANSFER,
-            aggregate_id=UUID(transfer_id),
+            aggregate_id=transfer_id,
             event_type=event_type,
+            actor_id=actor_id,
             actor_type=actor_type,
-            actor_id=UUID(actor_id) if actor_id else None,
             reason=reason,
-            metadata=metadata or {},
-            previous_event_hash=previous.event_hash if previous else None,
-        )
-        self.session.add(
-            AuditEventModel(
-                id=str(event.id),
-                aggregate_type=event.aggregate_type.value,
-                aggregate_id=str(event.aggregate_id),
-                event_type=event.event_type,
-                actor_id=str(event.actor_id) if event.actor_id else None,
-                actor_type=event.actor_type.value,
-                reason=event.reason,
-                metadata_json=event.metadata,
-                occurred_at=event.occurred_at,
-                previous_event_hash=event.previous_event_hash,
-                event_hash=event.event_hash,
-            )
+            metadata=metadata,
         )
 
     @staticmethod

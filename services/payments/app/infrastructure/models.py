@@ -37,6 +37,9 @@ class TransferModel(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING_COMPLIANCE")
     failure_code: Mapped[str | None] = mapped_column(String(64))
     failure_reason: Mapped[str | None] = mapped_column(String(1024))
+    reversal_of_transfer_id: Mapped[str | None] = mapped_column(
+        ForeignKey("transfers.id"), unique=True, nullable=True
+    )
     requested_by: Mapped[str] = mapped_column(String(36), nullable=False)
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -52,12 +55,14 @@ class LedgerTransactionModel(Base):
     __tablename__ = "ledger_transactions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
-    transfer_id: Mapped[str] = mapped_column(ForeignKey("transfers.id"), unique=True, nullable=False)
+    transfer_id: Mapped[str | None] = mapped_column(ForeignKey("transfers.id"), unique=True, nullable=True)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    memo: Mapped[str | None] = mapped_column(String(1024))
+    entered_by: Mapped[str | None] = mapped_column(String(36))
     posted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
-    transfer: Mapped[TransferModel] = relationship(back_populates="ledger_transaction")
+    transfer: Mapped[TransferModel | None] = relationship(back_populates="ledger_transaction")
     entries: Mapped[list["LedgerEntryModel"]] = relationship(back_populates="ledger_transaction", cascade="all, delete-orphan")
 
 

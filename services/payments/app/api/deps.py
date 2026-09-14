@@ -23,6 +23,8 @@ def get_current_user(
         payload = decode_access_token(token)
     except jwt.PyJWTError:
         raise credentials_error from None
+    if payload.get("type") != "access":
+        raise credentials_error
 
     user = session.get(UserModel, payload.get("sub"))
     if user is None:
