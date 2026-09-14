@@ -174,6 +174,39 @@ def test_create_transfer_rejects_invalid_money_rules(
 	assert response.status_code == expected_status
 
 
+def test_list_wallets_returns_all_wallets(client: TestClient) -> None:
+	first = create_wallet(client, currency="USD")
+	second = create_wallet(client, currency="EUR")
+
+	response = client.get("/api/v1/wallets")
+
+	assert response.status_code == 200
+	ids = {wallet["id"] for wallet in response.json()}
+	assert {first["id"], second["id"]} <= ids
+
+
+def test_list_transfers_returns_all_transfers(client: TestClient) -> None:
+	source = create_wallet(client, balance="20")
+	destination = create_wallet(client)
+	created = client.post(
+		"/api/v1/transfers",
+		headers={"Idempotency-Key": str(uuid4())},
+		json={
+			"source_wallet_id": source["id"],
+			"destination_wallet_id": destination["id"],
+			"amount": "5",
+			"currency": "USD",
+			"requested_by": str(uuid4()),
+		},
+	)
+
+	response = client.get("/api/v1/transfers")
+
+	assert response.status_code == 200
+	ids = {transfer["id"] for transfer in response.json()}
+	assert created.json()["id"] in ids
+
+
 def test_get_transfer_returns_transfer_and_not_found(client: TestClient) -> None:
 	source = create_wallet(client, balance="20")
 	destination = create_wallet(client)

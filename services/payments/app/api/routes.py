@@ -65,6 +65,11 @@ def create_wallet(payload: WalletCreate, session: Session = Depends(get_session)
     return wallet
 
 
+@router.get("/wallets", response_model=list[WalletResponse])
+def list_wallets(session: Session = Depends(get_session)) -> list[WalletModel]:
+    return list(session.scalars(select(WalletModel).order_by(WalletModel.created_at.desc())))
+
+
 @router.get("/wallets/{wallet_id}", response_model=WalletResponse)
 def get_wallet(wallet_id: UUID, session: Session = Depends(get_session)) -> WalletModel:
     wallet = session.get(WalletModel, str(wallet_id))
@@ -97,6 +102,11 @@ def create_transfer(
     except ValidationError as error:
         status_code = 409 if "active" in str(error) else 400
         raise HTTPException(status_code=status_code, detail=str(error)) from error
+
+
+@router.get("/transfers", response_model=list[TransferResponse])
+def list_transfers(session: Session = Depends(get_session)) -> list[TransferModel]:
+    return list(session.scalars(select(TransferModel).order_by(TransferModel.created_at.desc())))
 
 
 @router.get("/transfers/{transfer_id}", response_model=TransferResponse)
