@@ -6,13 +6,13 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/ledgerflow
-      FRONTEND_ORIGIN: http://localhost:5173
-      JWT_SECRET: dev-secret-change-me-before-any-real-deploy
-    depends_on:
-      db:
-        condition: service_healthy
+      DATABASE_URL: ${DATABASE_URL}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:5173}
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me-before-any-real-deploy}
 
+  # Local Postgres, kept for offline dev — not started automatically by `app`
+  # anymore. Run `docker compose up db` and point DATABASE_URL at it in .env
+  # if you want to work without a Supabase connection.
   db:
     image: postgres:15
     environment:
