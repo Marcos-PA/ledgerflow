@@ -17,8 +17,12 @@ python_files = ["test_*.py", "*_test.py", "testes.py"]
 [tool.fastapi]
 entrypoint = "services.payments.app.main:app"
 
+[tool.ruff.lint]
+select = ["F", "E9"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
     "alembic>=1.15.0",
+    "ruff>=0.16.7",
 ]

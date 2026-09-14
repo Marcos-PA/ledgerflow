@@ -1,3 +1,4 @@
+import os
 from collections.abc import Generator
 from decimal import Decimal
 from uuid import uuid4
@@ -36,11 +37,15 @@ from services.payments.app.main import app
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> Generator[TestClient, None, None]:
-	engine = create_engine(
-		"sqlite://",
-		connect_args={"check_same_thread": False},
-		poolclass=StaticPool,
-	)
+	test_database_url = os.environ.get("TEST_DATABASE_URL")
+	if test_database_url:
+		engine = create_engine(test_database_url)
+	else:
+		engine = create_engine(
+			"sqlite://",
+			connect_args={"check_same_thread": False},
+			poolclass=StaticPool,
+		)
 	session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 	monkeypatch.setattr(database, "engine", engine)
 	monkeypatch.setattr(database, "SessionLocal", session_factory)

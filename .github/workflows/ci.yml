@@ -17,6 +17,21 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
 
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ledgerflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ledgerflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -35,11 +50,34 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
+      - name: Lint
+        run: uv run ruff check .
+
       - name: Compile Python files
         run: uv run python -m compileall -q services
 
-      - name: Run tests
+      - name: Run tests (SQLite)
         run: uv run pytest -q
+
+      - name: Run tests (Postgres)
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/ledgerflow
+        run: uv run pytest -q
+
+      - name: Apply Alembic migrations against Postgres
+        env:
+          DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/ledgerflow
+        run: uv run alembic upgrade head
 
       - name: Verify FastAPI application imports
         run: uv run python -c "from services.payments.app.main import app; print(app.title)"
+
+  docker-build:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build payments service image
+        run: docker build -f services/payments/Dockerfile -t ledgerflow-payments:ci .
